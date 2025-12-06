@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Resident Raver — Mini HTML Game</title>
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:system-ui,Arial}
+    .wrap{display:flex;flex-direction:column;align-items:center;padding:12px}
+    canvas{image-rendering:pixelated;border:6px solid #222;background:#87ceeb}
+    .hud{margin-top:8px;display:flex;gap:12px;align-items:center}
+    button{padding:8px 12px;border-radius:6px;border:none;background:#0b84ff;color:white}
+    .info{max-width:760px;text-align:left;margin-top:12px;font-size:13px;color:#ccc}
+    a.repo{color:#9cf}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Resident Raver — Mini HTML Game</h2>
+    <canvas id="game" width="640" height="480"></canvas>
+    <div class="hud">
+      <button id="restart">Restart</button>
+      <div id="status">Use ← → to move, Z to jump, X to shoot, G to throw grenade, Tab to switch weapon</div>
+    </div>
+    <div class="info">
+      <strong>Notes:</strong> Simple single-file implementation inspired by Unit II (Part II). The graphics are colored rectangles. This is designed to be run locally by opening the file in a browser.
+    </div>
+  </div>
+
+<script>
+(() => {
+  // Simple 2D platformer with player, zombies, bullets, grenade, level exit
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const TILE = 32; // tile size
+  const GRAVITY = 900; // px/s^2
+
+  // Level map: 20 cols x 15 rows
+  const MAP_COLS = Math.floor(W / TILE);
+  const MAP_ROWS = Math.floor(H / TILE);
+
+  // 0 = empty, 1 = ground/platform, 2 = exit
+  const levelData = [
+    // 20 cols per row
+  ];
+
+  // Build a sample level
+  for (let r=0;r<MAP_ROWS;r++){
+    const row = [];
+    for (let c=0;c<MAP_COLS;c++){
+      if (r >= MAP_ROWS-2) row.push(1); // ground
+      else if (r === MAP_ROWS-4 && c>6 && c<12) row.push(1); // floating platform
+      else row.push(0);
+    }
+    levelData.push(row);
+  }
+  // place an exit tile
+  levelData[MAP_ROWS-3][MAP_COLS-2] = 2;
+
+  // Entities
+  const entities = [];
+
+  function rectsOverlap(a,b){
+    return !(a.x+b.w <= b.x || a.x >= b.x+b.w || a.y+a.h <= b.y || a.y >= b.y+b.h);
+  }
+
+  // Player
+  const player = {
+    x: 50, y: H-3*TILE-40, w:18, h:28,
+    vx:0, vy:0, speed:220, jump:360, onGround:false,
+    facing:1, weapon:0, totalWeapons:2, activeWeapon:'bullet',
+    health:20, invincible:0,
+    startX:50, startY:H-3*TILE-40
+  };
+
+  function spawnZombie(x,y){
+    const z = {type:'zombie', x,y,w:18,h:28, vx:40*(Math.random()<0.5? -1:1), vy:0, speed:40, health:6, flip:false};
+    entities.push(z);
+  }
+
+  // spawn a few zombies
+  spawnZombie(300, H-3*TILE-28);
+  spawnZombie(420, H-3*TILE-28);
+  spawnZombie(520, H-3*TILE-28);
+
+  function spawnBullet(x,y,dir){
+    entities.push({type:'bullet', x,y,w:8,h:4, vx:dir*420, vy:0, life:2});
+  }
+  function spawnGrenade(x,y,dir){
+    entities.push({type:'grenade', x,y,w:10,h:10, vx:dir*240, vy:-250 + -Math.random()*40, bounces:0, life:3});
+  }
+
+  // Input
+  const keys = {};
+  window.addEventListener('keydown', e=>{
+    keys[e.key] = true;
+    if (e.key === 'Tab') { e.preventDefault(); player.weapon = (player.weapon+1)%player.totalWeapons; player.activeWeapon = player.weapon===0?'bullet':'grenade'; }
+  });
+  window.addEventListener('keyup', e=>{ keys[e.key]=false; });
+
+  // Collision helpers
+  function tileAt(px,py){
+    const c = Math.floor(px / TILE);
+    const r = Math.floor(py / TILE);
+    if (r<0 || r>=MAP_ROWS || c<0 || c>=MAP_COLS) return 0;
+    return levelData[r][c];
+  }
+  function collidesWithMap(ent){
+    // check four corners
+    const corners = [
+      {x:ent.x,y:ent.y},
+      {x:ent.x+ent.w,y:ent.y},
+      {x:ent.x,y:ent.y+ent.h},
+      {x:ent.x+ent.w,y:ent.y+ent.h}
+    ];
+    for (const c of corners){
+      const t = tileAt(c.x, c.y);
+      if (t===1) return true;
+    }
+    return false;
+  }
+
+  // Physics & update
+  let last = performance.now();
+  function step(now){
+    const dt = Math.min(0.05, (now-last)/1000);
+    last = now;
+
+    // Player input and movement
+    let accel = 0;
+    if (keys['ArrowLeft'] || keys['a']){ accel = -1; player.facing = -1; }
+    if (keys['ArrowRight'] || keys['d']){ accel = 1; player.facing = 1; }
+    player.vx = accel * player.speed;
+    // jump (Z or z or w or ArrowUp)
+    if ((keys['z'] || keys['Z'] || keys['w'] || keys['ArrowUp']) && player.onGround){ player.vy = -player.jump; player.onGround=false; }
+
+    // shoot: X key
+    if (keys['x'] && !player._shootLock){
+      player._shootLock = true;
+      if (player.weapon===0){ spawnBullet(player.x + (player.facing>0?player.w: -8), player.y + player.h/2 -2, player.facing); }
+      else { spawnGrenade(player.x + (player.facing>0?player.w: -10), player.y + player.h/2 -5, player.facing); }
+    }
+    if (!keys['x']) player._shootLock = false;
+
+    // grenade: G
+    if (keys['g'] && !player._gLock){ player._gLock = true; spawnGrenade(player.x + (player.facing>0?player.w: -10), player.y + player.h/2 -5, player.facing); }
+    if (!keys['g']) player._gLock = false;
+
+    // Apply gravity
+    player.vy += GRAVITY * dt;
+    // Integrate
+    player.x += player.vx * dt;
+    // horizontal collisions
+    if (collidesWithMap(player)){
+      // simple resolution: step back
+      player.x -= player.vx * dt;
+      player.vx = 0;
+    }
+    player.y += player.vy * dt;
+    // vertical collisions
+    if (collidesWithMap(player)){
+      // step back until not colliding and set onGround if moving down
+      player.y -= player.vy * dt;
+      // snap to nearest tile
+      if (player.vy > 0){
+        player.onGround = true;
+        player.vy = 0;
+        // align to tile
+        player.y = Math.floor((player.y+player.h)/TILE)*TILE - player.h;
+      } else { player.vy = 0; }
+    } else { player.onGround = false; }
+
+    // Keep player in view
+    if (player.y > H){ // fell off
+      respawnPlayer();
+    }
+
+    // Update entities
+    for (let i=entities.length-1;i>=0;i--){
+      const e = entities[i];
+      if (e.type === 'zombie'){
+        // basic AI: move and turn at edges/walls
+        e.vy += GRAVITY * dt;
+        e.x += e.vx * dt;
+        // if hitting wall or falling, flip
+        const footX = e.x + (e.vx>0? e.w+2 : -2);
+        const footY = e.y + e.h + 2;
+        if (tileAt(footX, footY) === 0){ e.vx = -e.vx; }
+        // wall collision
+        if (collidesWithMap(e)){
+          e.x -= e.vx * dt; e.vx = -e.vx;
+        }
+        e.y += e.vy * dt;
+        if (collidesWithMap(e)){
+          e.y -= e.vy * dt; e.vy = 0;
+        }
+        // collide with player
+        if (rectsOverlap({...e,x:e.x,y:e.y,w:e.w,h:e.h}, {...player,x:player.x,y:player.y,w:player.w,h:player.h}) ){ if (!player.invincible){ player.health -= 5; player.invincible = 1.0; respawnIfDead(); }}
+      }
+      else if (e.type==='bullet'){
+        e.x += e.vx * dt;
+        // check map collisions
+        if (collidesWithMap(e)) { entities.splice(i,1); continue; }
+        // check against zombies
+        for (let j=0;j<entities.length;j++){ const z=entities[j]; if (z.type==='zombie' && rectsOverlap({...e}, {...z,x:z.x,y:z.y,w:z.w,h:z.h})){ z.health -= 3; entities.splice(i,1); if (z.health<=0){ entities.splice(j,1); } break; } }
+        e.life -= dt; if (e.life<=0){ entities.splice(i,1); }
+      }
+      else if (e.type==='grenade'){
+        e.vy += GRAVITY * dt;
+        e.x += e.vx * dt; e.y += e.vy * dt;
+        // collision with tile
+        if (collidesWithMap(e)){
+          // bounce logic: invert velocity and dampen
+          e.bounces++; e.vx *= -0.4; e.vy *= -0.5; // bounce back
+          // if many bounces -> explode
+          if (e.bounces > 3){ explode(e.x, e.y); entities.splice(i,1); continue; }
+        }
+        // check damage to zombies/player
+        for (let j=0;j<entities.length;j++){ const z=entities[j]; if (z.type==='zombie' && rectsOverlap({...e}, {...z,x:z.x,y:z.y,w:z.w,h:z.h})){ z.health -= 10; entities.splice(i,1); if (z.health<=0){ entities.splice(j,1); } break; } }
+        e.life -= dt; if (e.life<=0){ explode(e.x,e.y); entities.splice(i,1); }
+      }
+    }
+
+    // update invincible
+    if (player.invincible > 0){ player.invincible -= dt; if (player.invincible < 0) player.invincible = 0; }
+
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  function explode(x,y){
+    // simple AoE: damage zombies near
+    const R = 64;
+    for (let i=entities.length-1;i>=0;i--){ const z=entities[i]; if (z.type==='zombie'){ const dx=(z.x+z.w/2)-x; const dy=(z.y+z.h/2)-y; if (dx*dx+dy*dy <= R*R) { z.health -= 10; if (z.health<=0) entities.splice(i,1); } } }
+  }
+
+  function respawnPlayer(){ player.x = player.startX; player.y = player.startY; player.vx = player.vy = 0; player.health = 20; player.invincible = 1.5; }
+  function respawnIfDead(){ if (player.health <= 0){ respawnPlayer(); } }
+
+  function draw(){
+    // clear
+    ctx.fillStyle = '#87ceeb'; ctx.fillRect(0,0,W,H);
+
+    // draw map
+    for (let r=0;r<MAP_ROWS;r++){
+      for (let c=0;c<MAP_COLS;c++){
+        const t = levelData[r][c];
+        if (t===1){ ctx.fillStyle='#654321'; ctx.fillRect(c*TILE, r*TILE, TILE, TILE); ctx.fillStyle='#5a2e0a'; ctx.fillRect(c*TILE, r*TILE+TILE-6, TILE, 6); }
+        else if (t===2){ ctx.fillStyle='#2ecc71'; ctx.fillRect(c*TILE+4, r*TILE+4, TILE-8, TILE-8); ctx.fillStyle='#073b07'; ctx.fillText('EXIT', c*TILE+8, r*TILE+TILE/2+4); }
+      }
+    }
+
+    // draw entities
+    for (const e of entities){
+      if (e.type==='zombie'){ ctx.fillStyle='#6b2e2e'; ctx.fillRect(e.x, e.y, e.w, e.h); }
+      else if (e.type==='bullet'){ ctx.fillStyle='#fff'; ctx.fillRect(e.x, e.y, e.w, e.h); }
+      else if (e.type==='grenade'){ ctx.fillStyle='#333'; ctx.fillRect(e.x, e.y, e.w, e.h); }
+    }
+
+    // draw player
+    ctx.save();
+    if (player.invincible>0){ ctx.globalAlpha = 0.5 + 0.5*Math.sin(performance.now()/120); }
+    ctx.fillStyle = '#ffdd57'; ctx.fillRect(player.x, player.y, player.w, player.h);
+    // muzzle/gun hint
+    ctx.fillStyle = '#222'; ctx.fillRect(player.x + (player.facing>0?player.w: -6), player.y+6, 6,4);
+    ctx.restore();
+
+    // HUD
+    ctx.fillStyle = '#0008'; ctx.fillRect(6,6,160,56);
+    ctx.fillStyle = '#fff'; ctx.font='14px monospace'; ctx.fillText('HP: '+player.health, 12, 24);
+    ctx.fillText('Weapon: '+(player.weapon===0? 'Bullet':'Grenade'), 12, 44);
+
+    // debug: entities count
+    ctx.fillStyle = '#fff8'; ctx.font='12px monospace'; ctx.fillText('Zombies: '+entities.filter(v=>v.type==='zombie').length, W-120, 20);
+
+  }
+
+  document.getElementById('restart').addEventListener('click', ()=>{ entities.length = 0; spawnZombie(300, H-3*TILE-28); spawnZombie(420, H-3*TILE-28); spawnZombie(520, H-3*TILE-28); player.x=player.startX; player.y=player.startY; player.health=20; });
+
+  // Start game loop
+  requestAnimationFrame(step);
+
+})();
+</script>
+</body>
+</html>
